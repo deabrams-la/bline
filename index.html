@@ -1,0 +1,542 @@
+import { useState, useEffect, useCallback, useRef, memo } from "react";
+import { initAuth, requestNotificationPermission, onForegroundMessage, uploadPhoto } from "./firebase";
+import { useCollection, useSettings } from "./hooks";
+
+/* ─── CONSTANTS ─── */
+const PC={Netflix:"#C0392B",Hulu:"#26A69A","Disney+":"#0063E5","HBO Max":"#8E4585","Apple TV+":"#2E7D5E","Amazon Prime":"#00897B",Peacock:"#FFD54F",Spotify:"#26A69A","Apple Music":"#E84B8A",YouTube:"#C0392B","YouTube Music":"#C0392B",Tidal:"#6A1B5D",SoundCloud:"#F4845F",Amazon:"#FF9900",Kindle:"#FF9900",Audible:"#F4845F","Local Library":"#26A69A",Goodreads:"#8E4585","Bookshop.org":"#2E7D5E"};
+const TV_PLAT=["Netflix","Hulu","Disney+","HBO Max","Apple TV+","Amazon Prime","Peacock","YouTube"];
+const MUSIC_PLAT=["Spotify","Apple Music","YouTube Music","Tidal","SoundCloud"];
+const BOOK_PLAT=["Kindle","Audible","Amazon","Local Library","Bookshop.org","Goodreads"];
+const TV_GEN=["Drama","Comedy","Thriller","Documentary","Sci-Fi","Romance","Action","Animation","Reality","Feel-Good"];
+const MUSIC_GEN=["Pop","Rock","R&B","Hip-Hop","Jazz","Classical","Country","Indie","Chill","Uplifting"];
+const BOOK_GEN=["Fiction","Non-Fiction","Memoir","Self-Help","Mystery","Romance","Sci-Fi","Biography","Humor","Inspirational"];
+const ADV_CAT=["Comfort Items","Nausea Relief","Energy & Rest","Emotional Support","Nutrition","General Tips"];
+const RX_EMOJIS=["❤️","🙏","💪","🥰","😢","🎉","🤗","✨"];
+const rc=()=>["#E84B8A","#26A69A","#F4845F","#8E4585","#FFD54F","#00897B","#D94A7A","#2E7D5E"][Math.floor(Math.random()*8)];
+const timeAgo=(ts)=>{if(!ts||!ts.toDate)return"Just now";const s=Math.floor((Date.now()-ts.toDate().getTime())/1000);if(s<60)return"Just now";if(s<3600)return`${Math.floor(s/60)}m ago`;if(s<86400)return`${Math.floor(s/3600)}h ago`;return`${Math.floor(s/86400)}d ago`};
+
+/* ─── STYLES (static, never re-created) ─── */
+const S={
+  card:{background:"white",borderRadius:20,padding:"18px",marginBottom:12,boxShadow:"0 2px 14px rgba(0,0,0,0.04)",border:"1px solid rgba(232,75,138,0.06)"},
+  st:{fontFamily:"'Playfair Display','Georgia',serif",fontSize:20,fontWeight:700,color:"#2D3436",letterSpacing:"-0.3px"},
+  tag:(c)=>({display:"inline-block",padding:"3px 9px",borderRadius:7,fontSize:11,fontWeight:700,background:`${c}18`,color:c}),
+  inp:{width:"100%",padding:"13px 15px",borderRadius:13,border:"2px solid #F0D8E0",fontSize:15,fontFamily:"'DM Sans',sans-serif",outline:"none",boxSizing:"border-box"},
+  ta:{width:"100%",padding:"13px 15px",borderRadius:13,border:"2px solid #F0D8E0",fontSize:15,fontFamily:"'DM Sans',sans-serif",outline:"none",minHeight:90,resize:"vertical",boxSizing:"border-box"},
+};
+const btn=(p,sm)=>({padding:sm?"7px 14px":p?"13px 26px":"9px 18px",borderRadius:13,border:p?"none":"2px solid #F8C8D8",background:p?"linear-gradient(135deg,#E84B8A,#F4845F,#FFD54F)":"white",color:p?"white":"#E84B8A",fontWeight:700,fontSize:sm?12:p?15:13,cursor:"pointer",fontFamily:"'DM Sans',sans-serif",transition:"all 0.2s"});
+const av=(c)=>({width:38,height:38,borderRadius:13,background:`linear-gradient(135deg,${c},${c}CC)`,display:"flex",alignItems:"center",justifyContent:"center",color:"white",fontWeight:700,fontSize:15,flexShrink:0});
+
+/* ─── Stable sub-components ─── */
+const BriannaPhoto=memo(({size=50,resting=false})=>(
+  <div style={{width:size,height:size,borderRadius:"50%",overflow:"hidden",border:`3px solid rgba(255,255,255,${resting?0.4:0.8})`,boxShadow:"0 2px 12px rgba(0,0,0,0.15)",position:"relative",flexShrink:0}}>
+    <img src="/brianna.jpg" alt="Brianna" style={{width:"100%",height:"100%",objectFit:"cover",filter:resting?"brightness(0.7)":""}}/>
+    {resting&&<div style={{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",fontSize:size*0.5}}>😴</div>}
+  </div>
+));
+
+const ReactionBar=memo(({reactions={},onReact,messageId})=>{
+  const[open,setOpen]=useState(false);
+  const grouped=Object.entries(reactions||{}).reduce((a,[u,e])=>{a[e]=(a[e]||0)+1;return a},{});
+  return(
+    <div style={{position:"relative"}}>
+      <div style={{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",marginTop:6}}>
+        {Object.entries(grouped).map(([e,c])=>(
+          <button key={e} onClick={()=>onReact(messageId,e)} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 8px",borderRadius:20,border:"1px solid #F0E0E8",background:"#FFF8FA",fontSize:13,cursor:"pointer",fontFamily:"'DM Sans',sans-serif",color:"#666",fontWeight:600}}>{e} <span style={{fontSize:11}}>{c}</span></button>
+        ))}
+        <button onClick={()=>setOpen(!open)} style={{width:28,height:28,borderRadius:14,border:"1px dashed #DDD",background:"white",fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:"#CCC"}}>+</button>
+      </div>
+      {open&&(
+        <div style={{position:"absolute",bottom:"100%",left:0,marginBottom:6,background:"white",borderRadius:16,padding:"8px 6px",boxShadow:"0 4px 20px rgba(0,0,0,0.12)",display:"flex",gap:2,zIndex:50}}>
+          {RX_EMOJIS.map(e=><button key={e} onClick={()=>{onReact(messageId,e);setOpen(false)}} style={{width:36,height:36,borderRadius:10,border:"none",background:"transparent",fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>{e}</button>)}
+        </div>
+      )}
+    </div>
+  );
+});
+
+const ReplyThread=memo(({parentId,parentCollection,userName})=>{
+  const[open,setOpen]=useState(false);
+  const[text,setText]=useState("");
+  const[replies,setReplies]=useState([]);
+  const[loaded,setLoaded]=useState(false);
+  const inputRef=useRef(null);
+
+  useEffect(()=>{
+    if(!open||loaded)return;
+    import("./firebase").then(({db})=>{
+      import("firebase/firestore").then(({collection,query,orderBy,onSnapshot})=>{
+        const q=query(collection(db,parentCollection,parentId,"replies"),orderBy("createdAt","asc"));
+        const unsub=onSnapshot(q,(snap)=>{
+          setReplies(snap.docs.map(d=>({id:d.id,...d.data()})));
+          setLoaded(true);
+        });
+        return unsub;
+      });
+    });
+  },[open,loaded,parentId,parentCollection]);
+
+  const submit=async()=>{
+    if(!text.trim())return;
+    const{db}=await import("./firebase");
+    const{collection,addDoc,serverTimestamp}=await import("firebase/firestore");
+    await addDoc(collection(db,parentCollection,parentId,"replies"),{
+      author:userName,text:text.trim(),
+      color:rc(),createdAt:serverTimestamp(),
+    });
+    setText("");
+  };
+
+  const count=replies.length;
+  return(
+    <div style={{marginTop:6}}>
+      <button onClick={()=>{setOpen(!open);if(!open)setTimeout(()=>inputRef.current?.focus(),100)}} style={{background:"none",border:"none",fontSize:12,color:"#B2BEC3",cursor:"pointer",fontFamily:"'DM Sans',sans-serif",fontWeight:600,padding:0,display:"flex",alignItems:"center",gap:4}}>
+        💬 {open?"Hide replies":(count>0?`${count} repl${count===1?"y":"ies"}`:"Reply")}
+      </button>
+      {open&&(
+        <div style={{marginTop:8,paddingLeft:12,borderLeft:"2px solid #F0E0E8"}}>
+          {replies.map(r=>(
+            <div key={r.id} style={{display:"flex",gap:8,marginBottom:8}}>
+              <div style={{...av(r.color||"#999"),width:26,height:26,fontSize:11,borderRadius:9}}>{(r.author||"?")[0]}</div>
+              <div style={{flex:1}}>
+                <span style={{fontWeight:700,fontSize:12,color:"#2D3436"}}>{r.author}</span>
+                <span style={{fontSize:12,color:"#B2BEC3",marginLeft:6}}>{timeAgo(r.createdAt)}</span>
+                <p style={{fontSize:13,color:"#636E72",lineHeight:1.4,margin:"2px 0 0"}}>{r.text}</p>
+              </div>
+            </div>
+          ))}
+          <div style={{display:"flex",gap:6,marginTop:4}}>
+            <input ref={inputRef} style={{...S.inp,fontSize:13,padding:"8px 12px",flex:1}} placeholder="Write a reply..." value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")submit()}}/>
+            <button onClick={submit} style={{...btn(true,true),padding:"8px 14px",flexShrink:0}}>Send</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});
+function Confetti({active}){if(!active)return null;return(<div style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:9999}}>{Array.from({length:60},(_,i)=>{const c=["#E84B8A","#FFD54F","#26A69A","#F4845F","#8E4585","#FF8A65"][i%6];const s=5+Math.random()*9;return<div key={i} style={{position:"absolute",left:`${Math.random()*100}%`,top:"-12px",width:s,height:s,backgroundColor:c,borderRadius:Math.random()>.5?"50%":"2px",animation:`cf ${2+Math.random()*3}s ease-in ${Math.random()*2}s forwards`}}/>})}</div>)}
+function Floats(){return(<div style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:0}}>{Array.from({length:10},(_,i)=>{const c=["#E84B8A","#26A69A","#F4845F","#8E4585","#FFD54F"][i%5];const sym=["✦","♡","☀","✿","◇"][i%5];return<div key={i} style={{position:"absolute",left:`${Math.random()*100}%`,bottom:"-30px",fontSize:10+Math.random()*16,opacity:.04+Math.random()*.05,color:c,animation:`fu ${18+Math.random()*22}s ease-in-out ${Math.random()*18}s infinite`}}>{sym}</div>})}</div>)}
+
+/* ─── Modal with stable focus ─── */
+function ModalShell({title,onClose,children}){
+  return(
+    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.4)",backdropFilter:"blur(4px)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onMouseDown={onClose}>
+      <div onMouseDown={e=>e.stopPropagation()} style={{background:"white",borderRadius:"26px 26px 0 0",padding:"26px 20px 36px",width:"100%",maxWidth:600,maxHeight:"82vh",overflowY:"auto",animation:"su 0.3s ease-out"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <div style={{...S.st,fontSize:18}}>{title}</div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:"#999"}}>✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Individual modal forms (each manages own state to prevent parent re-renders) ─── */
+function WishModal({onClose,onSubmit}){
+  const[text,setText]=useState("");
+  const ref=useRef(null);
+  useEffect(()=>{if(ref.current)ref.current.focus()},[]);
+  return(
+    <ModalShell title="Send a Well Wish 💛" onClose={onClose}>
+      <textarea ref={ref} style={S.ta} placeholder="Write your message of love and support..." value={text} onChange={e=>setText(e.target.value)}/>
+      <button style={{...btn(true),width:"100%",marginTop:14}} onClick={()=>{if(text.trim()){onSubmit(text);onClose()}}}>Send Love 💛</button>
+    </ModalShell>
+  );
+}
+
+function UpdateModal({onClose,onSubmit}){
+  const[text,setText]=useState("");
+  const[photo,setPhoto]=useState(null);
+  const[preview,setPreview]=useState(null);
+  const[uploading,setUploading]=useState(false);
+  const ref=useRef(null);
+  const fileRef=useRef(null);
+  useEffect(()=>{if(ref.current)ref.current.focus()},[]);
+  const handleFile=(e)=>{
+    const file=e.target.files?.[0];
+    if(!file)return;
+    setPhoto(file);
+    const reader=new FileReader();
+    reader.onload=(ev)=>setPreview(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+  const handleSubmit=async()=>{
+    if(!text.trim()&&!photo)return;
+    setUploading(true);
+    try{await onSubmit(text,false,photo);onClose()}
+    catch(e){console.error(e);setUploading(false)}
+  };
+  return(
+    <ModalShell title="Post an Update 📌" onClose={onClose}>
+      <textarea ref={ref} style={S.ta} placeholder="Share an update with the village..." value={text} onChange={e=>setText(e.target.value)}/>
+      <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{display:"none"}}/>
+      <div style={{marginTop:10}}>
+        {preview?(
+          <div style={{position:"relative",display:"inline-block"}}>
+            <img src={preview} alt="Preview" style={{width:"100%",maxHeight:200,objectFit:"cover",borderRadius:13,border:"2px solid #F0D8E0"}}/>
+            <button onClick={()=>{setPhoto(null);setPreview(null);if(fileRef.current)fileRef.current.value=""}} style={{position:"absolute",top:6,right:6,width:28,height:28,borderRadius:14,background:"rgba(0,0,0,0.5)",border:"none",color:"white",fontSize:16,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+          </div>
+        ):(
+          <button onClick={()=>fileRef.current?.click()} style={{...btn(false,false),width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"14px",borderStyle:"dashed"}}>
+            📷 Add Photo
+          </button>
+        )}
+      </div>
+      <button style={{...btn(true),width:"100%",marginTop:16,opacity:uploading?0.6:1}} disabled={uploading} onClick={handleSubmit}>{uploading?"Uploading...":"Post Update"}</button>
+    </ModalShell>
+  );
+}
+
+function RecModal({onClose,onSubmit,title,platforms,genres,placeholder,notePlaceholder}){
+  const[t,setT]=useState("");
+  const[p,setP]=useState("");
+  const[g,setG]=useState("");
+  const[n,setN]=useState("");
+  const ref=useRef(null);
+  useEffect(()=>{if(ref.current)ref.current.focus()},[]);
+  const Sel=({value,onChange,options,ph})=>(
+    <select value={value} onChange={e=>onChange(e.target.value)} style={{...S.inp,appearance:"none",background:`white url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24'%3E%3Cpath fill='%23999' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E") no-repeat right 14px center`,color:value?"#2D3436":"#999"}}>
+      <option value="">{ph}</option>
+      {options.map(o=><option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+  return(
+    <ModalShell title={title} onClose={onClose}>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        <input ref={ref} style={S.inp} placeholder={placeholder} value={t} onChange={e=>setT(e.target.value)}/>
+        <Sel value={p} onChange={setP} options={platforms} ph="Select platform"/>
+        <Sel value={g} onChange={setG} options={genres} ph="Select genre"/>
+        <textarea style={{...S.ta,minHeight:70}} placeholder={notePlaceholder} value={n} onChange={e=>setN(e.target.value)}/>
+        <button style={{...btn(true),width:"100%"}} onClick={()=>{if(t.trim()){onSubmit({title:t,platform:p,genre:g,note:n});onClose()}}}>Add Recommendation</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function AdviceModal({onClose,onSubmit}){
+  const[text,setText]=useState("");
+  const[cat,setCat]=useState(ADV_CAT[0]);
+  const ref=useRef(null);
+  useEffect(()=>{if(ref.current)ref.current.focus()},[]);
+  const Sel=({value,onChange,options,ph})=>(
+    <select value={value} onChange={e=>onChange(e.target.value)} style={{...S.inp,appearance:"none",background:`white url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24'%3E%3Cpath fill='%23999' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E") no-repeat right 14px center`,color:value?"#2D3436":"#999"}}>
+      <option value="">{ph}</option>
+      {options.map(o=><option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+  return(
+    <ModalShell title="Share Advice 🤝" onClose={onClose}>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        <Sel value={cat} onChange={setCat} options={ADV_CAT} ph="Category"/>
+        <textarea ref={ref} style={S.ta} placeholder="Share a tip or anything that helped during treatment..." value={text} onChange={e=>setText(e.target.value)}/>
+        <button style={{...btn(true),width:"100%"}} onClick={()=>{if(text.trim()){onSubmit(text,cat);onClose()}}}>Share Advice</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ═══════════════════════════════
+   MAIN APP
+   ═══════════════════════════════ */
+export default function App(){
+  const[user,setUser]=useState(null);
+  const[userName,setUserName]=useState(()=>localStorage.getItem("bline_name")||"");
+  const[showNamePrompt,setShowNamePrompt]=useState(false);
+  const[nameInput,setNameInput]=useState("");
+  const[fcmReady,setFcmReady]=useState(false);
+  const[toast,setToast]=useState(null);
+
+  useEffect(()=>{initAuth(u=>setUser(u))},[]);
+  useEffect(()=>{if(user&&!userName)setShowNamePrompt(true)},[user,userName]);
+
+  /* FCM foreground notifications */
+  useEffect(()=>{
+    const unsub=onForegroundMessage((payload)=>{
+      const{title,body}=payload.notification||{};
+      setToast({title:title||"B-Line",body:body||""});
+      setTimeout(()=>setToast(null),5000);
+    });
+    return unsub;
+  },[]);
+
+  const saveName=useCallback((name)=>{
+    localStorage.setItem("bline_name",name);
+    setUserName(name);
+    setShowNamePrompt(false);
+    requestNotificationPermission(name).then(t=>{if(t)setFcmReady(true)});
+  },[]);
+
+  const ADMIN_NAMES=["dan","brianna"];
+  const isAdmin=ADMIN_NAMES.some(n=>userName.toLowerCase().startsWith(n));
+
+  const{settings,loading:sLoading,updateSettings}=useSettings();
+  const msgs=useCollection("messages");
+  const upds=useCollection("updates");
+  const tvs=useCollection("shows");
+  const mus=useCollection("music");
+  const bks=useCollection("books");
+  const advs=useCollection("advice");
+  const pends=useCollection("pending","createdAt","asc");
+
+  const[view,setView]=useState("home");
+  const[confetti,setCf]=useState(false);
+  const[mstone,setMs]=useState(null);
+  const[modal,setModal]=useState(null);
+  const[mTab,setMTab]=useState("watch");
+  const[tvF,setTvF]=useState("all");
+  const[muF,setMuF]=useState("all");
+  const[bkF,setBkF]=useState("all");
+  const[advF,setAdvF]=useState("all");
+
+  const celeb=useCallback((msg)=>{setCf(true);setMs(msg);setTimeout(()=>{setCf(false);setMs(null)},4000)},[]);
+  const closeModal=useCallback(()=>setModal(null),[]);
+
+  const startDate=settings.startDate?new Date(settings.startDate):new Date("2026-02-12");
+  const now=new Date();
+  const chemoRound=Math.max(0,Math.min(settings.totalChemo||12,settings.chemoRound||0));
+  const TC=settings.totalChemo||12;
+  const hMonth=settings.herceptinMonth||0;
+  const TH=settings.totalHerceptin||12;
+  const resting=settings.isResting||false;
+  const chemoPct=TC>0?Math.round((chemoRound/TC)*100):0;
+  const hPct=TH>0?Math.round((hMonth/TH)*100):0;
+  const chemoEnd=new Date(startDate);chemoEnd.setDate(chemoEnd.getDate()+(TC-1)*7);
+  const dChemo=Math.max(0,Math.ceil((chemoEnd-now)/(864e5)));
+  const nextChemo=new Date(startDate);nextChemo.setDate(nextChemo.getDate()+chemoRound*7);
+  const dNext=Math.max(0,Math.ceil((nextChemo-now)/(864e5)));
+  const hEnd=new Date(startDate);hEnd.setMonth(hEnd.getMonth()+TH);
+  const dH=Math.max(0,Math.ceil((hEnd-now)/(864e5)));
+
+  const handleReaction=useCallback(async(id,emoji)=>{
+    const msg=msgs.items.find(m=>m.id===id);if(!msg)return;
+    const rx={...(msg.reactions||{})};
+    if(rx[userName]===emoji)delete rx[userName];else rx[userName]=emoji;
+    await msgs.update(id,{reactions:rx});
+  },[msgs.items,userName,msgs.update]);
+
+  const handleUpdReaction=useCallback(async(id,emoji)=>{
+    const u=upds.items.find(x=>x.id===id);if(!u)return;
+    const rx={...(u.reactions||{})};
+    if(rx[userName]===emoji)delete rx[userName];else rx[userName]=emoji;
+    await upds.update(id,{reactions:rx});
+  },[upds.items,userName,upds.update]);
+
+  /* ─── Submit handlers (stable callbacks) ─── */
+  const submitWish=useCallback(async(text)=>{
+    await msgs.add({author:userName,text,color:rc(),reactions:{}});
+  },[userName,msgs.add]);
+
+  const submitUpdate=useCallback(async(text,isPrivate,photoFile)=>{
+    let photoURL=null;
+    if(photoFile){
+      photoURL=await uploadPhoto(photoFile);
+    }
+    const data={author:userName,text,isPrivate,reactions:{}};
+    if(photoURL)data.photoURL=photoURL;
+    await upds.add(data);
+  },[userName,upds.add]);
+
+  const submitShow=useCallback(async(data)=>{
+    await tvs.add({...data,author:userName,saved:false});
+  },[userName,tvs.add]);
+
+  const submitMusic=useCallback(async(data)=>{
+    await mus.add({...data,author:userName,saved:false});
+  },[userName,mus.add]);
+
+  const submitBook=useCallback(async(data)=>{
+    await bks.add({...data,author:userName,saved:false});
+  },[userName,bks.add]);
+
+  const submitAdvice=useCallback(async(text,category)=>{
+    await advs.add({author:userName,text,category,helpful:0,color:rc()});
+  },[userName,advs.add]);
+
+  /* ═══ NAME PROMPT ═══ */
+  if(showNamePrompt){
+    return(
+      <div style={{fontFamily:"'DM Sans',sans-serif",minHeight:"100vh",background:"linear-gradient(165deg,#FFF5EE 0%,#FDE8F0 35%,#F3E5F5 65%,#EDE7F6 100%)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+        <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap');*{box-sizing:border-box;margin:0;padding:0}`}</style>
+        <div style={{background:"white",borderRadius:28,padding:"40px 28px",maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 20px 60px rgba(232,75,138,0.12)"}}>
+          <BriannaPhoto size={80}/>
+          <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:28,fontWeight:800,color:"#2D3436",marginTop:12,marginBottom:4}}>B-Line</h1>
+          <p style={{color:"#999",fontSize:14,marginBottom:24}}>Welcome to Brianna's Village</p>
+          <input style={{...S.inp,textAlign:"center",marginBottom:16}} placeholder="What's your name?" value={nameInput} onChange={e=>setNameInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&nameInput.trim())saveName(nameInput.trim())}}/>
+          <button style={{...btn(true),width:"100%"}} onClick={()=>{if(nameInput.trim())saveName(nameInput.trim())}}>Join the Village 💛</button>
+          <p style={{fontSize:11,color:"#CCC",marginTop:16}}>Your name will appear on messages you post</p>
+        </div>
+      </div>
+    );
+  }
+
+  if(!user||sLoading){
+    return(
+      <div style={{fontFamily:"'DM Sans',sans-serif",minHeight:"100vh",background:"linear-gradient(165deg,#FFF5EE 0%,#FDE8F0 35%,#F3E5F5 65%,#EDE7F6 100%)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+        <style>{`@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@800&display=swap');@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}`}</style>
+        <div style={{textAlign:"center",animation:"pulse 1.5s ease-in-out infinite"}}><BriannaPhoto size={72}/><div style={{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:800,color:"#E84B8A",marginTop:10}}>B-Line</div></div>
+      </div>
+    );
+  }
+
+  /* ═══ VIEWS ═══ */
+  const Home=()=>(
+    <div>
+      {resting&&(<div style={{...S.card,background:"linear-gradient(135deg,#F3E5F5,#EDE7F6)",border:"2px solid #D1C4E9",textAlign:"center",padding:"22px 18px"}}><BriannaPhoto size={56} resting/><div style={{fontWeight:700,fontSize:16,color:"#6A1B5D",marginTop:8}}>Brianna is resting right now</div><div style={{fontSize:13,color:"#8E6D8E",marginTop:4}}>She'll catch up on messages when she's feeling up to it.</div></div>)}
+
+      {/* Treatment Progress */}
+      <div style={{...S.card,background:"linear-gradient(145deg,#FFF0E8 0%,#FDE8F0 40%,#F0E8F8 100%)",border:"2px solid rgba(232,75,138,0.12)",padding:"22px 20px",position:"relative",overflow:"hidden"}}>
+        <div style={{position:"absolute",top:-20,right:-20,width:80,height:80,borderRadius:"50%",background:"rgba(255,213,79,0.12)"}}/>
+        <div style={{position:"absolute",bottom:-10,left:-10,width:50,height:50,borderRadius:"50%",background:"rgba(38,166,154,0.08)"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,position:"relative"}}>
+          <div><div style={{fontSize:12,fontWeight:700,color:"#E84B8A",textTransform:"uppercase",letterSpacing:1}}>Treatment Progress</div><div style={{fontSize:12,color:"#999",marginTop:2}}>Started {startDate.toLocaleDateString("en-US",{month:"short",day:"numeric"})}</div></div>
+          <BriannaPhoto size={46} resting={resting}/>
+        </div>
+
+        {/* Chemo */}
+        <div style={{padding:"14px 16px",borderRadius:15,background:"rgba(255,255,255,0.7)",border:"1px solid rgba(232,75,138,0.1)",marginBottom:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div><div style={{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:800,color:"#2D3436"}}>💉 Chemo</div><div style={{fontSize:12,color:"#999",marginTop:1}}>{chemoRound<TC?(dNext<=0?"Treatment day! 💪":`Next in ${dNext} day${dNext!==1?"s":""}`):"Complete! ✨"}</div></div>
+            <div style={{textAlign:"right"}}><div style={{fontSize:22,fontWeight:800,color:"#E84B8A"}}>{chemoRound}/{TC}</div><div style={{fontSize:11,color:"#999"}}>weekly</div></div>
+          </div>
+          <div style={{width:"100%",height:14,borderRadius:8,background:"#F0E0E8",overflow:"hidden"}}><div style={{height:"100%",borderRadius:8,background:"linear-gradient(90deg,#E84B8A,#F4845F,#FFD54F)",width:`${chemoPct}%`,transition:"width 0.8s ease-out",position:"relative"}}>{chemoPct>8&&<div style={{position:"absolute",right:3,top:"50%",transform:"translateY(-50%)",width:9,height:9,borderRadius:"50%",background:"white",boxShadow:"0 1px 3px rgba(0,0,0,0.2)"}}/>}</div></div>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:12,color:"#999"}}><span style={{fontWeight:600,color:"#E84B8A"}}>{chemoPct}%</span><span>{chemoRound===TC?"Done! 🎉":`${dChemo}d left · ${chemoEnd.toLocaleDateString("en-US",{month:"short",day:"numeric"})}`}</span></div>
+        </div>
+
+        {/* Herceptin */}
+        <div style={{padding:"14px 16px",borderRadius:15,background:"rgba(255,255,255,0.7)",border:"1px solid rgba(38,166,154,0.1)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div><div style={{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:800,color:"#2D3436"}}>💚 Herceptin</div><div style={{fontSize:12,color:"#999",marginTop:1}}>{hMonth<TH?"Monthly treatments":"Complete! ✨"}</div></div>
+            <div style={{textAlign:"right"}}><div style={{fontSize:22,fontWeight:800,color:"#26A69A"}}>{hMonth}/{TH}</div><div style={{fontSize:11,color:"#999"}}>monthly</div></div>
+          </div>
+          <div style={{width:"100%",height:14,borderRadius:8,background:"#E0F2F1",overflow:"hidden"}}><div style={{height:"100%",borderRadius:8,background:"linear-gradient(90deg,#26A69A,#00897B)",width:`${hPct}%`,transition:"width 0.8s ease-out",position:"relative"}}>{hPct>8&&<div style={{position:"absolute",right:3,top:"50%",transform:"translateY(-50%)",width:9,height:9,borderRadius:"50%",background:"white",boxShadow:"0 1px 3px rgba(0,0,0,0.2)"}}/>}</div></div>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:12,color:"#999"}}><span style={{fontWeight:600,color:"#26A69A"}}>{hPct}%</span><span>{hMonth===TH?"Done! 🎉":`${dH}d left · ${hEnd.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}`}</span></div>
+        </div>
+
+        {isAdmin&&(<div style={{display:"flex",gap:8,marginTop:14,flexWrap:"wrap"}}>{chemoRound<TC&&<button style={btn(true,true)} onClick={async()=>{const n=chemoRound+1;await updateSettings({chemoRound:n});celeb(`Chemo round ${n} of ${TC}!${n===TC?" 🎉 Chemo DONE!":""}`)}}>🎉 Complete Chemo</button>}{hMonth<TH&&<button style={{...btn(false,true),borderColor:"#26A69A",color:"#26A69A"}} onClick={async()=>{const n=hMonth+1;await updateSettings({herceptinMonth:n});celeb(`Herceptin ${n} of ${TH}!${n===TH?" 💚 All done!":""}`)}}>💚 Complete Herceptin</button>}</div>)}
+      </div>
+
+      {/* Updates */}
+      <div style={{marginTop:6}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><h2 style={S.st}>📌 Updates</h2>{isAdmin&&<button style={btn(false,true)} onClick={()=>setModal("update")}>+ Post</button>}</div>
+        {upds.items.map(u=>(<div key={u.id} style={{...S.card,borderLeft:"4px solid #26A69A"}}><p style={{fontSize:15,lineHeight:1.6,color:"#2D3436",margin:"0 0 8px"}}>{u.text}</p>{u.photoURL&&<img src={u.photoURL} alt="Update photo" style={{width:"100%",borderRadius:13,marginBottom:8,maxHeight:300,objectFit:"cover"}}/>}<div style={{fontSize:12,color:"#999"}}><strong style={{color:"#E84B8A"}}>{u.author}</strong> · {timeAgo(u.createdAt)}</div><ReactionBar reactions={u.reactions} onReact={handleUpdReaction} messageId={u.id}/><ReplyThread parentId={u.id} parentCollection="updates" userName={userName}/></div>))}
+        {upds.items.length===0&&<div style={{...S.card,textAlign:"center",color:"#999"}}>No updates yet.{isAdmin?" Post the first one!":""}</div>}
+      </div>
+
+      {/* Recent Wishes */}
+      <div style={{marginTop:6}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><h2 style={S.st}>💛 Recent Wishes</h2><button style={btn(false,true)} onClick={()=>setView("wishes")}>View All</button></div>
+        {msgs.items.slice(0,3).map(m=>(<div key={m.id} style={S.card}><div style={{display:"flex",gap:12}}><div style={av(m.color||"#E84B8A")}>{(m.author||"?")[0]}</div><div style={{flex:1}}><div style={{fontWeight:700,fontSize:14,color:"#2D3436"}}>{m.author}</div><p style={{fontSize:14,color:"#636E72",lineHeight:1.5,margin:"4px 0 0"}}>{m.text}</p><div style={{fontSize:11,color:"#B2BEC3",marginTop:5}}>{timeAgo(m.createdAt)}</div><ReactionBar reactions={m.reactions} onReact={handleReaction} messageId={m.id}/><ReplyThread parentId={m.id} parentCollection="messages" userName={userName}/></div></div></div>))}
+        {msgs.items.length===0&&<div style={{...S.card,textAlign:"center",color:"#999"}}>No wishes yet — be the first!</div>}
+      </div>
+    </div>
+  );
+
+  const Wishes=()=>(<div>
+    {resting&&<div style={{...S.card,background:"#F3E5F5",border:"2px solid #D1C4E9",textAlign:"center",padding:16,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}><BriannaPhoto size={32} resting/><span style={{fontSize:13,color:"#6A1B5D",fontWeight:600}}>Brianna is resting — she'll read your messages when she's up!</span></div>}
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,marginTop:4}}><h2 style={S.st}>💛 Well Wishes</h2><button style={btn(true,false)} onClick={()=>setModal("wish")}>+ Send Love</button></div>
+    {msgs.items.map(m=>(<div key={m.id} style={S.card}><div style={{display:"flex",gap:12}}><div style={av(m.color||"#E84B8A")}>{(m.author||"?")[0]}</div><div style={{flex:1}}><div style={{fontWeight:700,fontSize:14,color:"#2D3436"}}>{m.author}</div><p style={{fontSize:15,color:"#636E72",lineHeight:1.6,margin:"5px 0 0"}}>{m.text}</p><div style={{fontSize:11,color:"#B2BEC3",marginTop:6}}>{timeAgo(m.createdAt)}</div><ReactionBar reactions={m.reactions} onReact={handleReaction} messageId={m.id}/><ReplyThread parentId={m.id} parentCollection="messages" userName={userName}/></div></div></div>))}
+    {msgs.items.length===0&&<div style={{...S.card,textAlign:"center",color:"#999"}}>No wishes yet — be the first!</div>}
+  </div>);
+
+  const MediaView=()=>{
+    const tabs=[{id:"watch",l:"📺 Watch"},{id:"listen",l:"🎵 Listen"},{id:"read",l:"📚 Read"}];
+    const coll=mTab==="watch"?tvs:mTab==="listen"?mus:bks;
+    const cf=mTab==="watch"?tvF:mTab==="listen"?muF:bkF;
+    const scf=mTab==="watch"?setTvF:mTab==="listen"?setMuF:setBkF;
+    const gens=mTab==="watch"?TV_GEN:mTab==="listen"?MUSIC_GEN:BOOK_GEN;
+    const filt=cf==="all"?coll.items:coll.items.filter(i=>i.genre===cf);
+    const gc=mTab==="watch"?"#26A69A":mTab==="listen"?"#E84B8A":"#8E4585";
+    const si=mTab==="watch"?["⭐","☆"]:mTab==="listen"?["❤️","🤍"]:["📖","📕"];
+    const mid=mTab==="watch"?"tv":mTab==="listen"?"music":"book";
+    const tt={watch:"What to Watch",listen:"Music Recs",read:"Book List"};
+    return(<div>
+      <div style={{display:"flex",gap:0,margin:"4px 0 14px",background:"#FDE8F0",borderRadius:14,padding:3}}>{tabs.map(t=><button key={t.id} onClick={()=>setMTab(t.id)} style={{flex:1,padding:"10px 0",borderRadius:12,border:"none",background:mTab===t.id?"white":"transparent",boxShadow:mTab===t.id?"0 2px 8px rgba(0,0,0,0.06)":"none",fontWeight:700,fontSize:13,cursor:"pointer",color:mTab===t.id?"#2D3436":"#999",fontFamily:"'DM Sans',sans-serif"}}>{t.l}</button>)}</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><h2 style={S.st}>{tt[mTab]}</h2><button style={btn(true,true)} onClick={()=>setModal(mid)}>+ Add</button></div>
+      <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:8,marginBottom:8}}>{["all",...gens.slice(0,7)].map(g=><button key={g} onClick={()=>scf(g)} style={{...btn(cf===g,true),whiteSpace:"nowrap",flexShrink:0}}>{g==="all"?"All":g}</button>)}</div>
+      {filt.length===0&&<div style={{textAlign:"center",padding:30,color:"#999"}}>Nothing here yet — add the first!</div>}
+      {filt.map(item=>(<div key={item.id} style={S.card}><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div style={{flex:1}}><div style={{fontWeight:700,fontSize:16,color:"#2D3436"}}>{item.title}</div><div style={{display:"flex",gap:5,marginTop:5,flexWrap:"wrap"}}>{item.platform&&<span style={S.tag(PC[item.platform]||"#666")}>{item.platform}</span>}{item.genre&&<span style={S.tag(gc)}>{item.genre}</span>}</div>{item.note&&<p style={{fontSize:14,color:"#636E72",lineHeight:1.5,margin:"7px 0"}}>"{item.note}"</p>}<div style={{fontSize:12,color:"#B2BEC3"}}>From {item.author} · {timeAgo(item.createdAt)}</div></div><button onClick={()=>coll.update(item.id,{saved:!item.saved})} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",opacity:item.saved?1:.35}}>{item.saved?si[0]:si[1]}</button></div></div>))}
+    </div>);
+  };
+
+  const AdviceView=()=>{
+    const f=advF==="all"?advs.items:advs.items.filter(a=>a.category===advF);
+    return(<div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,marginTop:4}}><h2 style={S.st}>🤝 Advice & Tips</h2><button style={btn(true,true)} onClick={()=>setModal("advice")}>+ Share</button></div>
+      <p style={{fontSize:13,color:"#999",marginBottom:12,lineHeight:1.5}}>Share tips, comfort ideas, or anything that helped during treatment.</p>
+      <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:8,marginBottom:8}}>{["all",...ADV_CAT].map(c=><button key={c} onClick={()=>setAdvF(c)} style={{...btn(advF===c,true),whiteSpace:"nowrap",flexShrink:0}}>{c==="all"?"All":c}</button>)}</div>
+      {f.length===0&&<div style={{textAlign:"center",padding:30,color:"#999"}}>No advice yet — share the first tip!</div>}
+      {f.map(a=>(<div key={a.id} style={S.card}><div style={{display:"flex",gap:12}}><div style={av(a.color||"#26A69A")}>{(a.author||"?")[0]}</div><div style={{flex:1}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div><div style={{fontWeight:700,fontSize:14,color:"#2D3436"}}>{a.author}</div><span style={{...S.tag("#26A69A"),marginTop:3}}>{a.category}</span></div><button onClick={()=>advs.update(a.id,{helpful:(a.helpful||0)+1})} style={{background:"none",border:"1px solid #E0E0E0",borderRadius:10,padding:"4px 10px",fontSize:12,cursor:"pointer",color:"#666",fontFamily:"'DM Sans',sans-serif",fontWeight:600}}>👍 {a.helpful||0}</button></div><p style={{fontSize:14,color:"#636E72",lineHeight:1.6,margin:"8px 0 4px"}}>{a.text}</p><div style={{fontSize:11,color:"#B2BEC3"}}>{timeAgo(a.createdAt)}</div></div></div></div>))}
+    </div>);
+  };
+
+  const navItems=[{id:"home",icon:"☀",label:"Home"},{id:"wishes",icon:"💛",label:"Wishes"},{id:"media",icon:"📺",label:"Media"},{id:"advice",icon:"🤝",label:"Advice"}];
+
+  return(
+    <div style={{fontFamily:"'DM Sans','Nunito',sans-serif",minHeight:"100vh",background:"linear-gradient(165deg,#FFF5EE 0%,#FDE8F0 35%,#F3E5F5 65%,#EDE7F6 100%)",maxWidth:600,margin:"0 auto",position:"relative",overflow:"hidden"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        @keyframes su{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes popIn{0%{opacity:0;transform:translate(-50%,-50%) scale(0.8)}50%{transform:translate(-50%,-50%) scale(1.04)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+        @keyframes cf{0%{transform:translateY(0) rotate(0);opacity:1}100%{transform:translateY(100vh) rotate(720deg);opacity:0}}
+        @keyframes fu{0%{transform:translateY(0) rotate(0);opacity:0}10%{opacity:.06}90%{opacity:.06}100%{transform:translateY(-100vh) rotate(360deg);opacity:0}}
+        @keyframes toastIn{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}
+        button:active{transform:scale(0.96)!important}
+        input:focus,textarea:focus,select:focus{border-color:#E84B8A!important;outline:none}
+        ::-webkit-scrollbar{width:0}
+      `}</style>
+      <Floats/><Confetti active={confetti}/>
+
+      {/* Foreground notification toast */}
+      {toast&&(<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:"white",borderRadius:16,padding:"12px 20px",boxShadow:"0 8px 30px rgba(0,0,0,0.15)",zIndex:10001,animation:"toastIn 0.3s ease-out",display:"flex",alignItems:"center",gap:10,maxWidth:360}} onClick={()=>setToast(null)}>
+        <BriannaPhoto size={32}/><div><div style={{fontWeight:700,fontSize:13,color:"#2D3436"}}>{toast.title}</div><div style={{fontSize:12,color:"#666"}}>{toast.body}</div></div>
+      </div>)}
+
+      {mstone&&(<div style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",background:"white",borderRadius:28,padding:"36px 32px",textAlign:"center",zIndex:10000,boxShadow:"0 20px 60px rgba(232,75,138,0.3)",animation:"popIn 0.5s ease-out",maxWidth:340}}><div style={{fontSize:52,marginBottom:10}}>🎉</div><div style={{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:800,color:"#2D3436",lineHeight:1.3}}>{mstone}</div><p style={{fontSize:15,color:"#636E72",marginTop:8}}>You're incredible, Brianna!</p></div>)}
+
+      {/* HEADER */}
+      <div style={{background:"linear-gradient(135deg,#F4845F 0%,#E84B8A 35%,#D94A7A 55%,#8E4585 80%,#6A1B5D 100%)",padding:"18px 20px 22px",borderRadius:"0 0 26px 26px",position:"relative",zIndex:10,overflow:"hidden"}}>
+        <div style={{position:"absolute",top:-15,right:30,width:60,height:60,borderRadius:"50%",background:"rgba(255,213,79,0.15)"}}/>
+        <div style={{position:"absolute",bottom:-10,left:20,width:40,height:40,borderRadius:"50%",background:"rgba(38,166,154,0.12)"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",position:"relative"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}><BriannaPhoto size={44} resting={resting}/><div><h1 style={{fontFamily:"'Playfair Display','Georgia',serif",fontSize:26,fontWeight:800,color:"white",letterSpacing:"-0.5px",textShadow:"0 2px 10px rgba(0,0,0,0.15)"}}>B-Line</h1><div style={{color:"rgba(255,255,255,0.85)",fontSize:12,fontWeight:500}}>Brianna's Village · {resting?"😴 Resting":"☀️ Online"}</div></div></div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            {isAdmin&&<button onClick={()=>updateSettings({isResting:!resting})} style={{background:resting?"rgba(255,255,255,0.3)":"rgba(255,255,255,0.18)",border:"none",borderRadius:12,padding:"6px 10px",color:"white",fontSize:11,fontWeight:700,cursor:"pointer"}}>{resting?"😴":"☀️"}</button>}
+            {isAdmin&&<button onClick={()=>setModal("admin")} style={{background:"rgba(255,255,255,0.18)",border:"none",borderRadius:12,padding:"6px 10px",color:"white",fontSize:11,fontWeight:700,cursor:"pointer"}}>⚙</button>}
+            <div style={{background:"rgba(255,255,255,0.18)",borderRadius:12,padding:"6px 10px",color:"white",fontSize:11,fontWeight:600}}>{userName}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* NAV */}
+      <div style={{display:"flex",justifyContent:"space-around",padding:"6px 10px",background:"white",margin:"10px 14px",borderRadius:18,boxShadow:"0 3px 16px rgba(0,0,0,0.05)",position:"relative",zIndex:10}}>
+        {navItems.map(n=><button key={n.id} onClick={()=>setView(n.id)} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:1,padding:"8px 14px",borderRadius:13,border:"none",background:view===n.id?"linear-gradient(135deg,#E84B8A,#F4845F)":"transparent",color:view===n.id?"white":"#999",fontSize:11,fontWeight:view===n.id?700:500,cursor:"pointer",transition:"all 0.25s",fontFamily:"'DM Sans',sans-serif"}}><span style={{fontSize:18}}>{n.icon}</span>{n.label}</button>)}
+      </div>
+
+      <div style={{padding:"0 14px 100px",position:"relative",zIndex:5}}>
+        {view==="home"&&<Home/>}
+        {view==="wishes"&&<Wishes/>}
+        {view==="media"&&<MediaView/>}
+        {view==="advice"&&<AdviceView/>}
+      </div>
+
+      {/* ═══ MODALS (each is its own component with own state) ═══ */}
+      {modal==="wish"&&<WishModal onClose={closeModal} onSubmit={submitWish}/>}
+      {modal==="update"&&<UpdateModal onClose={closeModal} onSubmit={submitUpdate}/>}
+      {modal==="tv"&&<RecModal onClose={closeModal} onSubmit={submitShow} title="Recommend a Show 📺" platforms={TV_PLAT} genres={TV_GEN} placeholder="Show or movie title" notePlaceholder="Why should she watch this?"/>}
+      {modal==="music"&&<RecModal onClose={closeModal} onSubmit={submitMusic} title="Recommend Music 🎵" platforms={MUSIC_PLAT} genres={MUSIC_GEN} placeholder="Song, album, or playlist" notePlaceholder="Why do you love this?"/>}
+      {modal==="book"&&<RecModal onClose={closeModal} onSubmit={submitBook} title="Recommend a Book 📚" platforms={BOOK_PLAT} genres={BOOK_GEN} placeholder="Book title & author" notePlaceholder="Why is this a must-read?"/>}
+      {modal==="advice"&&<AdviceModal onClose={closeModal} onSubmit={submitAdvice}/>}
+      {modal==="admin"&&(
+        <ModalShell title="⚙ Admin Panel" onClose={closeModal}>
+          <div style={{fontSize:13,color:"#999",marginBottom:14}}>Admins: <strong style={{color:"#2D3436"}}>Dan & Brianna</strong></div>
+          <div style={{fontWeight:700,fontSize:15,color:"#2D3436",marginBottom:10}}>Pending ({pends.items.length})</div>
+          {pends.items.length===0&&<div style={{padding:16,textAlign:"center",color:"#999",fontSize:13}}>No pending requests ✓</div>}
+          {pends.items.map(u=>(<div key={u.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",borderRadius:14,background:"#F9F9F9",marginBottom:8}}><span style={{fontWeight:600,fontSize:14}}>{u.name}</span><div style={{display:"flex",gap:6}}><button style={{...btn(true,true),padding:"6px 14px"}} onClick={()=>pends.remove(u.id)}>✓</button><button style={{...btn(false,true),padding:"6px 14px",borderColor:"#C0392B",color:"#C0392B"}} onClick={()=>pends.remove(u.id)}>✕</button></div></div>))}
+          <div style={{marginTop:20,padding:14,borderRadius:14,background:"#FFF5EE",border:"1px solid #F4C4A0"}}><div style={{fontWeight:700,fontSize:14,color:"#2D3436",marginBottom:6}}>Share Link</div><div style={{display:"flex",gap:8}}><input style={{...S.inp,fontSize:13,flex:1}} readOnly value={typeof window!=="undefined"?window.location.href:""}/><button style={btn(true,true)} onClick={()=>navigator.clipboard.writeText(window.location.href)}>Copy</button></div></div>
+          <button style={{...btn(false,true),width:"100%",marginTop:16,color:"#999",borderColor:"#EEE"}} onClick={()=>{localStorage.removeItem("bline_name");setUserName("");setShowNamePrompt(true);closeModal()}}>Switch User</button>
+        </ModalShell>
+      )}
+    </div>
+  );
+}
